@@ -1,17 +1,13 @@
+import os
 from enum import Enum
 from typing import List, Dict
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from langchain_huggingface import HuggingFaceEndpoint
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
-import os
-import logging
-
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import uvicorn
 
 # Load environment variables
 load_dotenv()
@@ -19,21 +15,24 @@ load_dotenv()
 app = FastAPI()
 
 class Model(str, Enum):
-    zephyr = "HuggingFaceH4/zephyr-7b-beta"
+    mistral = "mistralai/Mistral-Nemo-Instruct-2407"
     llama2 = "meta-llama/Llama-2-7b-chat-hf"
-    mistral = "mistralai/Mistral-7B-Instruct-v0.1"
-
-# Model context storage
-model_context: Dict[str, List[str]] = {}
 
 class Query(BaseModel):
-    model: Model
     prompt: str = Field(..., min_length=1)
 
 class Response(BaseModel):
     response: str
 
-# Set up Hugging Face endpoints
+# Global variable to store the selected model
+SELECTED_MODEL: Model = None
+
+# Conversation history
+conversation_history: Dict[str, List[Dict[str, str]]] = {
+    Model.llama2.value: [],
+    Model.mistral.value: []
+}
+
 def create_llm(model: Model) -> HuggingFaceEndpoint:
     api_key = os.getenv("HUGGINGFACE_API_KEY")
     if not api_key:
@@ -48,34 +47,50 @@ def create_llm(model: Model) -> HuggingFaceEndpoint:
         huggingfacehub_api_token=api_key,
     )
 
-def get_context(model: Model) -> List[str]:
-    if model.value not in model_context:
-        model_context[model.value] = []
-    return model_context[model.value]
+@app.post("/select_model")
+async def select_model(model: Model):
+    global SELECTED_MODEL
+    SELECTED_MODEL = model
+    return {"message": f"Model selected: {model.value}"}
 
 @app.post("/query", response_model=Response)
-async def query_llm(query: Query, context: List[str] = Depends(get_context)):
-    context.append(query.prompt)
-    full_prompt = "\n".join(context)
-    
+async def query_llm(query: Query):
+    if not SELECTED_MODEL:
+        raise HTTPException(status_code=400, detail="No model selected. Please select a model first.")
+
     try:
-        llm = create_llm(query.model)
-        template = """Question: {question}
+        llm = create_llm(SELECTED_MODEL)
+        
+        # Prepare context from conversation history
+        context = "\n".join([f"Human: {item['human']}\nAI: {item['ai']}" for item in conversation_history[SELECTED_MODEL.value]])
+        
+        full_prompt = f"{context}\nHuman: {query.prompt}\nAI:"
+        
+        template = """{full_prompt}
         Answer: Let's think step by step."""
-        prompt = PromptTemplate(template=template, input_variables=["question"])
+        prompt = PromptTemplate(template=template, input_variables=["full_prompt"])
         
         llm_chain = LLMChain(llm=llm, prompt=prompt)
-        response = llm_chain.invoke(full_prompt)
+        response = llm_chain.invoke({"full_prompt": full_prompt})
         
-        response_text = response.get('text', '')
+        response_text = response.get('text', '').strip()
+        
+        # Update conversation history
+        conversation_history[SELECTED_MODEL.value].append({
+            "human": query.prompt,
+            "ai": response_text
+        })
+        
     except Exception as e:
-        logger.error(f"An error occurred: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-    
-    context.append(response_text)
     
     return Response(response=response_text)
 
+@app.get("/conversation_history")
+async def get_conversation_history():
+    if not SELECTED_MODEL:
+        raise HTTPException(status_code=400, detail="No model selected. Please select a model first.")
+    return conversation_history[SELECTED_MODEL.value]
+
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
