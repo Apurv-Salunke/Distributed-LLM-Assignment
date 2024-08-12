@@ -1,0 +1,20 @@
+version: '3'
+
+services:
+  python_server:
+    build:
+      context: ./python_server
+    ports:
+      - "8000:8000"
+    environment:
+      - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
+    depends_on:
+      - node_server
+
+  node_server:
+    build:
+      context: ./node_server
+    ports:
+      - "3000:3000"
+    depends_on:
+      - python_server
